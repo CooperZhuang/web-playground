@@ -117,6 +117,19 @@
         const predatorSpeed = 6;
         const predatorTurnForce = 0.1;
 
+        // 把实体硬性关在活动范围里，并把速度分量反弹回来。
+        // 只翻速度、不夹位置的话，转向加速度会持续把虎鲸往外推，最终飞出场景再也不回来。
+        function confine(entity) {
+            const p = entity.position;
+            const v = entity.velocity;
+            if (p.x > width) { p.x = width; v.x = -Math.abs(v.x); }
+            else if (p.x < 0) { p.x = 0; v.x = Math.abs(v.x); }
+            if (p.y > height) { p.y = height; v.y = -Math.abs(v.y); }
+            else if (p.y < 0) { p.y = 0; v.y = Math.abs(v.y); }
+            if (p.z > wanderDepth) { p.z = wanderDepth; v.z = -Math.abs(v.z); }
+            else if (p.z < -wanderDepth) { p.z = -wanderDepth; v.z = Math.abs(v.z); }
+        }
+
         // 捕食者行为状态
         const PREDATOR_STATE = {
             HUNT: 'hunt',
@@ -128,8 +141,8 @@
         let remainingCount = initialFishCount;
 
         // 鼠标位置对象
-        let mouse = new Vector(-1000, -1000, 0);
-        let lastMousePosition = new Vector(-1000, -1000, 0);
+        let mouse = new Vector(width / 2, height / 2, 0);
+        let lastMousePosition = new Vector(width / 2, height / 2, 0);
 
         window.addEventListener('mousemove', (e) => {
             mouse.x = e.clientX;
@@ -182,7 +195,15 @@
                     // 如果虎鲸进入了鱼群内部，就切换状态
                     if (fishSchoolCenter && Vector.sub(this.position, fishSchoolCenter).mag() < fishSchoolRadius * 0.5) {
                         this.state = PREDATOR_STATE.LEAVE;
-                        this.leaveTarget = this.position.add(Vector.random3D().mult(fishSchoolRadius * 2));
+                        // 注意：Vector.add 是原地修改，写成 this.position.add(...) 会把
+                        // leaveTarget 变成 position 自己的引用（目标永远追着自己），
+                        // 还会让虎鲸原地瞬移一大段。这里显式复制一份新坐标。
+                        const escape = Vector.random3D().mult(fishSchoolRadius * 2);
+                        this.leaveTarget = new Vector(
+                            this.position.x + escape.x,
+                            this.position.y + escape.y,
+                            this.position.z + escape.z
+                        );
                     }
 
                 } else if (this.state === PREDATOR_STATE.LEAVE) {
@@ -205,9 +226,7 @@
                 this.velocity.limit(predatorSpeed);
                 this.position.add(this.velocity);
                 
-                if (this.position.x > width || this.position.x < 0) this.velocity.x *= -1;
-                if (this.position.y > height || this.position.y < 0) this.velocity.y *= -1;
-                if (this.position.z > wanderDepth || this.position.z < -wanderDepth) this.velocity.z *= -1;
+                confine(this);
             }
 
             applyForce(force) {
@@ -269,7 +288,7 @@
                 const y2d = this.position.y * scale + (height / 2) * (1 - scale);
                 const size2d = predatorSize * scale;
 
-                const depthAlpha = 1 - (this.position.z / (wanderDepth * 2));
+                const depthAlpha = Math.max(0, Math.min(1, 1 - (this.position.z / (wanderDepth * 2))));
                 ctx.fillStyle = `rgba(100, 100, 100, ${depthAlpha})`;
                 ctx.strokeStyle = `rgba(0, 0, 0, ${depthAlpha})`;
                 ctx.beginPath();
@@ -297,10 +316,16 @@
                 this.state = PREDATOR_STATE.HUNT;
             }
 
-            update(mousePos, allPredators) {
+            update(mousePos, allPredators, flock) {
                 this.acceleration.mult(0);
-                
-                let desired = Vector.sub(mousePos, this.position);
+
+                // 鼠标只有 x/y，若直接用 z=0 当目标，这只虎鲸会永远卡在 z≈0 的平面，
+                // 吃不到深水区的鱼。这里取鱼群中心的 z 作为下潜深度。
+                const schoolCenter = getFishSchoolCenter(flock);
+                const targetZ = schoolCenter ? schoolCenter.z : 0;
+                const target = new Vector(mousePos.x, mousePos.y, targetZ);
+
+                let desired = Vector.sub(target, this.position);
                 let distance = desired.mag();
                 
                 if (distance > 0) {
@@ -422,7 +447,7 @@
                 let sum = new Vector(0, 0, 0);
                 let count = 0;
                 for (let other of others) {
-                    if (other.eatenState.isEaten) continue;
+                    if (other.eatenState.isEaten || other === this) continue;
                     sum.add(other.position);
                     count++;
                 }
@@ -476,9 +501,7 @@
 
             wrapAround() {
                 if (this.eatenState.isEaten) return;
-                if (this.position.x > width || this.position.x < 0) this.velocity.x *= -1;
-                if (this.position.y > height || this.position.y < 0) this.velocity.y *= -1;
-                if (this.position.z > wanderDepth || this.position.z < -wanderDepth) this.velocity.z *= -1;
+                confine(this);
             }
 
             draw() {
@@ -497,7 +520,7 @@
                 }
 
                 const size2d = currentSize * scale;
-                const depthAlpha = (1 - (this.position.z / (wanderDepth * 2))) * currentAlpha;
+                const depthAlpha = Math.max(0, Math.min(1, (1 - (this.position.z / (wanderDepth * 2))) * currentAlpha));
 
                 ctx.fillStyle = `rgba(255, 255, 255, ${depthAlpha})`;
                 ctx.strokeStyle = `rgba(255, 255, 255, ${depthAlpha})`;
@@ -542,7 +565,7 @@
         }
 
         // 鼠标虎鲸
-        const mousePredator = new MousePredator(-1000, -1000, 0);
+        const mousePredator = new MousePredator(width / 2, height / 2, 0);
 
         function updateCounters() {
             remainingCountEl.textContent = flock.filter(f => !f.eatenState.isEaten).length;
@@ -596,7 +619,7 @@
 
             const allPredators = [...predators, mousePredator];
 
-            mousePredator.update(mouse, allPredators);
+            mousePredator.update(mouse, allPredators, flock);
             mousePredator.draw();
 
             for (let predator of predators) {
