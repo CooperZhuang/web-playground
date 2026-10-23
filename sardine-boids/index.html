@@ -1,0 +1,316 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <title>沙丁鱼群 Demo - 区域漫步</title>
+    <style>
+        /* CSS样式：设置页面背景和信息文本的显示位置与样式 */
+        body { margin: 0; overflow: hidden; background-color: #001122; }
+        canvas { display: block; }
+        .info {
+            position: absolute;
+            top: 10px;
+            left: 10px;
+            color: white;
+            font-family: sans-serif;
+            font-size: 14px;
+        }
+    </style>
+</head>
+<body>
+    <canvas id="canvas"></canvas>
+    <div class="info">鼠标靠近即可观察沙丁鱼的躲避行为</div>
+
+    <script>
+        // 获取Canvas元素和2D渲染上下文
+        const canvas = document.getElementById('canvas');
+        const ctx = canvas.getContext('2d');
+        // 动态获取窗口尺寸
+        let width = window.innerWidth;
+        let height = window.innerHeight;
+        canvas.width = width;
+        canvas.height = height;
+
+        /**
+         * 矢量数学工具类
+         * 封装了2D矢量的基本运算，如加、减、乘、除、归一化、限制长度等。
+         * 这对于模拟物理运动非常重要。
+         */
+        class Vector {
+            constructor(x, y) {
+                this.x = x;
+                this.y = y;
+            }
+            // 矢量加法
+            add(v) { this.x += v.x; this.y += v.y; return this; }
+            // 矢量减法
+            sub(v) { this.x -= v.x; this.y -= v.y; return this; }
+            // 矢量与标量乘法
+            mult(s) { this.x *= s; this.y *= s; return this; }
+            // 矢量与标量除法
+            div(s) { this.x /= s; this.y /= s; return this; }
+            // 计算矢量的长度（模）
+            mag() { return Math.sqrt(this.x * this.x + this.y * this.y); }
+            // 归一化矢量（使其长度变为1）
+            normalize() {
+                const m = this.mag();
+                if (m > 0) this.div(m);
+                return this;
+            }
+            // 设置矢量的长度
+            setMag(m) { return this.normalize().mult(m); }
+            // 限制矢量的最大长度
+            limit(max) {
+                if (this.mag() > max) this.setMag(max);
+                return this;
+            }
+            // 静态方法：生成一个随机方向的单位矢量
+            static random2D() {
+                const angle = Math.random() * Math.PI * 2;
+                return new Vector(Math.cos(angle), Math.sin(angle));
+            }
+            // 静态方法：计算两个矢量的差
+            static sub(v1, v2) { return new Vector(v1.x - v2.x, v1.y - v2.y); }
+        }
+
+        // 存储所有鱼的数组
+        const flock = [];
+        // 鱼的数量
+        const fishCount = 1000;
+        // 鱼的尺寸
+        const fishSize = 8;
+        // 鱼的最大速度
+        const maxSpeed = 3;
+        // 鱼的最大转向力
+        const maxForce = 0.05;
+
+        // Boids算法参数（调整这些参数可以改变鱼群行为）
+        const separationDistance = 30;  // 分离距离：鱼会避免进入这个距离内
+        const alignmentDistance = 50;   // 对齐距离：鱼会在此距离内尝试与邻居同步速度
+        const separationWeight = 2.5;   // 分离力权重
+        const alignmentWeight = 1.0;    // 对齐力权重
+        const cohesionWeight = 1.2;     // 聚集力权重
+        
+        // 捕食者（鼠标）参数
+        const predatorDistance = 100;   // 捕食者感应距离
+        const predatorWeight = 5;       // 躲避捕食者的力权重
+
+        // 鱼群的漫步中心点和相关参数
+        const wanderRadius = Math.min(width, height) / 4; // 漫步区域半径
+        const wanderMaxSpeed = 0.5; // 漫步中心点的移动速度
+        let wanderTarget = new Vector(width / 2, height / 2); // 漫步中心点
+        let wanderVelocity = Vector.random2D().mult(wanderMaxSpeed); // 漫步中心点的移动速度矢量
+
+        // 鼠标位置，初始设置在屏幕外
+        let mouse = { x: -1000, y: -1000 };
+
+        // 监听鼠标移动事件，更新鼠标位置
+        window.addEventListener('mousemove', (e) => {
+            mouse.x = e.clientX;
+            mouse.y = e.clientY;
+        });
+
+        // 监听窗口尺寸变化事件，更新Canvas尺寸
+        window.addEventListener('resize', () => {
+            width = window.innerWidth;
+            height = window.innerHeight;
+            canvas.width = width;
+            canvas.height = height;
+        });
+
+        /**
+         * Fish类
+         * 模拟每条鱼的行为，包括位置、速度、加速度以及三种Boids规则。
+         */
+        class Fish {
+            constructor(x, y) {
+                this.position = new Vector(x, y); // 位置
+                this.velocity = Vector.random2D().mult(maxSpeed); // 初始速度
+                this.acceleration = new Vector(0, 0); // 加速度
+            }
+            
+            // 更新鱼的位置和速度
+            update() {
+                this.velocity.add(this.acceleration); // 速度 = 速度 + 加速度
+                this.velocity.limit(maxSpeed); // 限制速度不超过最大值
+                this.position.add(this.velocity); // 位置 = 位置 + 速度
+                this.acceleration.mult(0); // 加速度清零，为下一帧做准备
+            }
+            
+            // 施加一个力
+            applyForce(force) { this.acceleration.add(force); }
+            
+            // 转向力计算：计算朝向目标点所需的力
+            steer(target) {
+                let desired = Vector.sub(target, this.position); // 计算期望矢量
+                let dist = desired.mag();
+                desired.normalize();
+                
+                if (dist > 0) {
+                    desired.mult(maxSpeed);
+                    let steer = Vector.sub(desired, this.velocity);
+                    steer.limit(maxForce);
+                    return steer;
+                }
+                return new Vector(0, 0);
+            }
+
+            /**
+             * 沙丁鱼群行为规则集合
+             * 鱼的最终行为是多种规则（分离、对齐、聚集、躲避捕食者）叠加的结果。
+             */
+            flock(others, wanderTarget) {
+                // 计算三种基本Boids规则产生的力
+                let separation = this.separate(others).mult(separationWeight);
+                let alignment = this.align(others).mult(alignmentWeight);
+                let cohesion = this.steer(wanderTarget).mult(cohesionWeight);
+                let predatorAvoid = this.avoidPredator();
+
+                // 如果有捕食者在附近，主要施加躲避力
+                if (predatorAvoid.mag() > 0) {
+                    predatorAvoid.mult(predatorWeight);
+                    this.applyForce(predatorAvoid);
+                    // 在躲避时仍然保持部分群集行为
+                    this.applyForce(separation);
+                    this.applyForce(alignment);
+                } else {
+                    // 没有捕食者时，施加Boids三项基本规则力
+                    this.applyForce(separation);
+                    this.applyForce(alignment);
+                    this.applyForce(cohesion);
+                }
+            }
+            
+            // 规则1：分离 - 避免拥挤
+            separate(others) {
+                let steer = new Vector(0, 0);
+                let count = 0;
+                for (let other of others) {
+                    let d = Vector.sub(this.position, other.position).mag();
+                    if (d > 0 && d < separationDistance) {
+                        let diff = Vector.sub(this.position, other.position);
+                        diff.normalize();
+                        diff.div(d); // 距离越近，力越大
+                        steer.add(diff);
+                        count++;
+                    }
+                }
+                if (count > 0) {
+                    steer.div(count);
+                    steer.normalize();
+                    steer.mult(maxSpeed);
+                    steer.sub(this.velocity);
+                    steer.limit(maxForce);
+                }
+                return steer;
+            }
+
+            // 规则2：对齐 - 保持方向一致
+            align(others) {
+                let sum = new Vector(0, 0);
+                let count = 0;
+                for (let other of others) {
+                    let d = Vector.sub(this.position, other.position).mag();
+                    if (d > 0 && d < alignmentDistance) {
+                        sum.add(other.velocity);
+                        count++;
+                    }
+                }
+                if (count > 0) {
+                    sum.div(count);
+                    sum.normalize();
+                    sum.mult(maxSpeed);
+                    let steer = Vector.sub(sum, this.velocity);
+                    steer.limit(maxForce);
+                    return steer;
+                }
+                return new Vector(0, 0);
+            }
+
+            // 规则3：躲避捕食者
+            avoidPredator() {
+                let d = Vector.sub(this.position, mouse).mag();
+                if (d < predatorDistance) {
+                    let diff = Vector.sub(this.position, mouse);
+                    diff.normalize();
+                    let desired = diff.mult(maxSpeed);
+                    let steer = Vector.sub(desired, this.velocity);
+                    steer.limit(maxForce);
+                    return steer;
+                }
+                return new Vector(0, 0);
+            }
+
+            // 边界反弹：当鱼触及边界时，反转其速度
+            wrapAround() {
+                if (this.position.x > width || this.position.x < 0) {
+                    this.velocity.x *= -1;
+                }
+                if (this.position.y > height || this.position.y < 0) {
+                    this.velocity.y *= -1;
+                }
+            }
+
+            // 绘制鱼
+            draw() {
+                ctx.fillStyle = 'rgba(255, 255, 255, 0.8)';
+                ctx.strokeStyle = 'white';
+                ctx.beginPath();
+                
+                // 根据速度方向计算鱼头的朝向
+                const angle = this.velocity.mag() > 0 ? Math.atan2(this.velocity.y, this.velocity.x) : 0;
+                
+                // 使用Canvas的transform进行旋转和平移
+                ctx.save();
+                ctx.translate(this.position.x, this.position.y);
+                ctx.rotate(angle);
+                
+                // 绘制一个三角形代表鱼
+                ctx.moveTo(fishSize / 2, 0);
+                ctx.lineTo(-fishSize / 2, -fishSize / 4);
+                ctx.lineTo(-fishSize / 2, fishSize / 4);
+                ctx.closePath();
+                ctx.fill();
+                ctx.restore();
+            }
+        }
+
+        // 初始化鱼群
+        for (let i = 0; i < fishCount; i++) {
+            flock.push(new Fish(Math.random() * width, Math.random() * height));
+        }
+
+        // 动画主循环
+        function animate() {
+            // 更新漫步中心点的位置
+            wanderTarget.add(wanderVelocity);
+
+            // 漫步中心点在指定区域内反弹
+            if (wanderTarget.x > width / 2 + wanderRadius || wanderTarget.x < width / 2 - wanderRadius) {
+                wanderVelocity.x *= -1;
+            }
+            if (wanderTarget.y > height / 2 + wanderRadius || wanderTarget.y < height / 2 - wanderRadius) {
+                wanderVelocity.y *= -1;
+            }
+
+            // 清除上一帧的绘制内容
+            ctx.clearRect(0, 0, width, height);
+
+            // 遍历所有鱼，更新其行为和位置，并重新绘制
+            for (let fish of flock) {
+                // 每条鱼根据其他鱼和漫步中心点（或捕食者）来调整自己的行为
+                fish.flock(flock, wanderTarget); 
+                fish.update();
+                fish.wrapAround();
+                fish.draw();
+            }
+
+            // 请求下一帧动画
+            requestAnimationFrame(animate);
+        }
+
+        // 启动动画
+        animate();
+    </script>
+</body>
+</html>

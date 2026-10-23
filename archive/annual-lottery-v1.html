@@ -1,0 +1,142 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>年会抽奖</title>
+    <style>
+      body {
+        font-family: Arial, sans-serif;
+        text-align: center;
+      }
+
+      button {
+        font-size: 16px;
+        padding: 10px;
+        margin: 10px;
+      }
+
+      #participants,
+      #winners,
+      #prizes,
+      #history {
+        margin: 20px;
+        padding: 10px;
+        border: 1px solid #ccc;
+      }
+
+      .animation-target {
+        opacity: 0;
+        transition: opacity 1s ease-in-out;
+      }
+
+      .animation-target.show {
+        opacity: 1;
+      }
+    </style>
+  </head>
+  <body>
+    <h1>年会抽奖</h1>
+
+    <label for="fileInput">上传名单：</label>
+    <input
+      type="file"
+      id="fileInput"
+      accept=".txt, .csv"
+      onchange="handleFile()"
+    />
+
+    <label for="prizeName">奖品名称：</label>
+    <input type="text" id="prizeName" />
+
+    <label for="prizeQuantity">奖品数量：</label>
+    <input type="number" id="prizeQuantity" min="1" value="1" />
+
+    <button id="startBtn" onclick="startLottery()" disabled>开始抽奖</button>
+
+    <div id="participants"></div>
+    <div id="animationTarget" class="animation-target"></div>
+    <div id="history"><strong>历史记录：</strong></div>
+
+    <script>
+      let participants = [];
+      let prizeName = "";
+      let prizeQuantity = 1;
+
+      function handleFile() {
+        const fileInput = document.getElementById("fileInput");
+        const file = fileInput.files[0];
+
+        if (file) {
+          const reader = new FileReader();
+          reader.onload = function (e) {
+            const content = e.target.result;
+            participants = content
+              .split("\n")
+              .map((line) => line.trim())
+              .filter((line) => line !== "");
+            enableStartButton();
+          };
+          reader.readAsText(file, "UTF-8");
+        }
+      }
+
+      function enableStartButton() {
+        const startBtn = document.getElementById("startBtn");
+        startBtn.disabled = false;
+      }
+
+      function startLottery() {
+        if (participants.length === 0) {
+          alert("请先上传名单！");
+          return;
+        }
+
+        prizeName = document.getElementById("prizeName").value.trim();
+        prizeQuantity = parseInt(
+          document.getElementById("prizeQuantity").value,
+          10
+        );
+
+        // 检查奖品名称和数量是否有效
+        if (!prizeName || isNaN(prizeQuantity) || prizeQuantity < 1) {
+          alert("请输入有效的奖品名称和奖品数量！");
+          return;
+        }
+
+        // 模拟抽奖算法（随机选择一个参与者）
+        const winners = [];
+        for (let i = 0; i < prizeQuantity; i++) {
+          const winnerIndex = Math.floor(Math.random() * participants.length);
+          winners.push(participants[winnerIndex]);
+        }
+
+        // 显示参与者名单、中奖者和奖品信息
+        document.getElementById("participants").innerHTML =
+          "<strong>参与者名单：</strong> " + participants.join(", ");
+        document.getElementById(
+          "animationTarget"
+        ).innerHTML = `<strong>奖品：</strong> ${prizeName}`;
+        setTimeout(() => {
+          document.getElementById("winners").innerHTML =
+            "<strong>中奖者：</strong> " + winners.join(", ");
+          document.getElementById("animationTarget").classList.add("show");
+        }, 1000);
+
+        // 记录历史获奖人和奖品清单
+        const historyDiv = document.getElementById("history");
+        const historyEntry = document.createElement("div");
+        historyEntry.innerHTML = `<strong>奖品：</strong> ${prizeName}， <strong>中奖者：</strong> ${winners.join(
+          ", "
+        )}`;
+        historyDiv.insertBefore(historyEntry, historyDiv.firstChild);
+
+        // 清空动画目标
+        setTimeout(() => {
+          document.getElementById("animationTarget").classList.remove("show");
+          document.getElementById("animationTarget").innerHTML = "";
+        }, 3000);
+      }
+    </script>
+  </body>
+</html>

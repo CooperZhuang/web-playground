@@ -1,0 +1,636 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <title>沙丁鱼群与虎鲸捕食</title>
+    <style>
+        body {
+            margin: 0;
+            overflow: hidden;
+            background-color: #001122;
+        }
+        canvas { display: block; }
+        .info {
+            position: absolute;
+            top: 10px;
+            left: 10px;
+            color: white;
+            font-family: sans-serif;
+            font-size: 14px;
+            text-shadow: 1px 1px 2px black;
+        }
+    </style>
+</head>
+<body>
+    <canvas id="canvas"></canvas>
+    <div class="info">
+        <div>剩余: <span id="remainingCount"></span></div>
+        <div>吃掉: <span id="eatenCount"></span></div>
+        <br/>
+        <div>鼠标控制一只虎鲸</div>
+        <div>其他虎鲸分工合作捕食</div>
+    </div>
+
+    <script>
+        const canvas = document.getElementById('canvas');
+        const ctx = canvas.getContext('2d');
+        let width = window.innerWidth;
+        let height = window.innerHeight;
+        canvas.width = width;
+        canvas.height = height;
+
+        const remainingCountEl = document.getElementById('remainingCount');
+        const eatenCountEl = document.getElementById('eatenCount');
+
+        // 3D 矢量数学工具类
+        class Vector {
+            constructor(x, y, z) {
+                this.x = x || 0;
+                this.y = y || 0;
+                this.z = z || 0;
+            }
+
+            add(v) { this.x += v.x; this.y += v.y; this.z += v.z; return this; }
+            sub(v) { this.x -= v.x; this.y -= v.y; this.z -= v.z; return this; }
+            mult(s) { this.x *= s; this.y *= s; this.z *= s; return this; }
+            div(s) { this.x /= s; this.y /= s; this.z /= s; return this; }
+            mag() { return Math.sqrt(this.x * this.x + this.y * this.y + this.z * this.z); }
+            normalize() {
+                const m = this.mag();
+                if (m > 0) this.div(m);
+                return this;
+            }
+            setMag(m) { return this.normalize().mult(m); }
+            limit(max) {
+                if (this.mag() > max) this.setMag(max);
+                return this;
+            }
+            static random3D() {
+                const angle = Math.random() * Math.PI * 2;
+                const z = Math.random() * 2 - 1;
+                const xy = Math.sqrt(1 - z * z);
+                return new Vector(xy * Math.cos(angle), xy * Math.sin(angle), z);
+            }
+            static sub(v1, v2) { return new Vector(v1.x - v2.x, v1.y - v2.y, v1.z - v2.z); }
+            static distance(v1, v2) { return Vector.sub(v1, v2).mag(); }
+        }
+
+        // 摄像机参数
+        const camera = {
+            fov: 1000,
+            position: new Vector(width / 2, height / 2, -500),
+            target: new Vector(width / 2, height / 2, 0)
+        };
+
+        // 鱼群参数
+        let flock = [];
+        const initialFishCount = 1000;
+        const fishSize = 8;
+        const maxSpeed = 3;
+        const maxForce = 0.05;
+
+        // Boids算法参数
+        const separationDistance = 30;
+        const alignmentDistance = 50;
+        const separationWeight = 2.5;
+        const alignmentWeight = 1.0;
+        const cohesionWeight = 1.2;
+
+        // 捕食者参数
+        const predatorDistance = 150; // 鱼感知捕食者的距离
+        const predatorWeight = 5;
+        const eatingDistance = 25; // 虎鲸吃掉鱼的有效距离
+        const eatenAnimationDuration = 60;
+        const predatorAvoidDistance = 100; // 虎鲸相互避让的距离
+        const predatorAvoidWeight = 2; // 虎鲸避让的权重
+
+        // 漫步中心点
+        const wanderRadius = Math.min(width, height) / 4;
+        const wanderDepth = 200;
+        let wanderTarget = new Vector(width / 2, height / 2, 0);
+        let wanderVelocity = Vector.random3D().mult(0.5);
+
+        // 捕食者数组
+        const predators = [];
+        const predatorCount = 10;
+        const predatorSize = 40;
+        const predatorSpeed = 6;
+        const predatorTurnForce = 0.1;
+
+        // 捕食者行为状态
+        const PREDATOR_STATE = {
+            HUNT: 'hunt',
+            LEAVE: 'leave'
+        };
+
+        // 计数器
+        let eatenCount = 0;
+        let remainingCount = initialFishCount;
+
+        // 鼠标位置对象
+        let mouse = new Vector(-1000, -1000, 0);
+        let lastMousePosition = new Vector(-1000, -1000, 0);
+
+        window.addEventListener('mousemove', (e) => {
+            mouse.x = e.clientX;
+            mouse.y = e.clientY;
+            mouse.z = 0;
+        });
+
+        window.addEventListener('resize', () => {
+            width = window.innerWidth;
+            height = window.innerHeight;
+            canvas.width = width;
+            canvas.height = height;
+            wanderTarget = new Vector(width / 2, height / 2, 0);
+            camera.position = new Vector(width / 2, height / 2, -500);
+            camera.target = new Vector(width / 2, height / 2, 0);
+        });
+
+        // 虎鲸类
+        class Predator {
+            constructor(x, y, z) {
+                this.position = new Vector(x, y, z);
+                this.velocity = Vector.random3D().setMag(predatorSpeed);
+                this.acceleration = new Vector(0, 0, 0);
+                this.state = PREDATOR_STATE.HUNT;
+                this.targetFish = null;
+            }
+
+            update(allPredators, flock) {
+                this.acceleration.mult(0); // 重置加速度
+
+                let steer = new Vector(0, 0, 0);
+                const fishSchoolCenter = getFishSchoolCenter(flock);
+                const fishSchoolRadius = getFishSchoolRadius(flock, fishSchoolCenter);
+
+                if (this.state === PREDATOR_STATE.HUNT) {
+                    if (this.targetFish && !this.targetFish.eatenState.isEaten) {
+                        steer = this.seek(this.targetFish.position);
+                    } else {
+                        this.targetFish = this.findClosestFish(flock);
+                        if (this.targetFish) {
+                            steer = this.seek(this.targetFish.position);
+                        } else {
+                            // 如果没有鱼了，就回到鱼群中心
+                            if (fishSchoolCenter) {
+                                steer = this.seek(fishSchoolCenter);
+                            }
+                        }
+                    }
+
+                    // 如果虎鲸进入了鱼群内部，就切换状态
+                    if (fishSchoolCenter && Vector.sub(this.position, fishSchoolCenter).mag() < fishSchoolRadius * 0.5) {
+                        this.state = PREDATOR_STATE.LEAVE;
+                        this.leaveTarget = this.position.add(Vector.random3D().mult(fishSchoolRadius * 2));
+                    }
+
+                } else if (this.state === PREDATOR_STATE.LEAVE) {
+                    if (this.leaveTarget) {
+                        steer = this.seek(this.leaveTarget);
+                    }
+                    
+                    // 如果虎鲸游离到足够远，就切换回捕食状态
+                    if (fishSchoolCenter && Vector.sub(this.position, fishSchoolCenter).mag() > fishSchoolRadius * 1.5) {
+                         this.state = PREDATOR_STATE.HUNT;
+                    }
+                }
+                
+                this.applyForce(steer);
+                
+                const avoidForce = this.avoidPredators(allPredators);
+                this.applyForce(avoidForce.mult(predatorAvoidWeight));
+
+                this.velocity.add(this.acceleration);
+                this.velocity.limit(predatorSpeed);
+                this.position.add(this.velocity);
+                
+                if (this.position.x > width || this.position.x < 0) this.velocity.x *= -1;
+                if (this.position.y > height || this.position.y < 0) this.velocity.y *= -1;
+                if (this.position.z > wanderDepth || this.position.z < -wanderDepth) this.velocity.z *= -1;
+            }
+
+            applyForce(force) {
+                this.acceleration.add(force);
+            }
+
+            seek(target) {
+                let desired = Vector.sub(target, this.position);
+                desired.normalize();
+                desired.mult(predatorSpeed);
+                let steer = Vector.sub(desired, this.velocity);
+                steer.limit(predatorTurnForce);
+                return steer;
+            }
+
+            avoidPredators(others) {
+                let steer = new Vector(0, 0, 0);
+                let count = 0;
+                for (let other of others) {
+                    if (other === this) continue;
+                    let d = Vector.sub(this.position, other.position).mag();
+                    if (d > 0 && d < predatorAvoidDistance) {
+                        let diff = Vector.sub(this.position, other.position);
+                        diff.normalize();
+                        diff.div(d);
+                        steer.add(diff);
+                        count++;
+                    }
+                }
+                if (count > 0) {
+                    steer.div(count);
+                    steer.normalize();
+                    steer.mult(predatorSpeed);
+                    steer.sub(this.velocity);
+                    steer.limit(predatorTurnForce);
+                }
+                return steer;
+            }
+
+            findClosestFish(flock) {
+                let closest = null;
+                let minDist = Infinity;
+                for (let fish of flock) {
+                    if (!fish.eatenState.isEaten) {
+                        const d = Vector.distance(this.position, fish.position);
+                        if (d < minDist) {
+                            minDist = d;
+                            closest = fish;
+                        }
+                    }
+                }
+                return closest;
+            }
+
+            draw() {
+                const fov = camera.fov;
+                const scale = fov / (fov + this.position.z);
+                const x2d = this.position.x * scale + (width / 2) * (1 - scale);
+                const y2d = this.position.y * scale + (height / 2) * (1 - scale);
+                const size2d = predatorSize * scale;
+
+                const depthAlpha = 1 - (this.position.z / (wanderDepth * 2));
+                ctx.fillStyle = `rgba(100, 100, 100, ${depthAlpha})`;
+                ctx.strokeStyle = `rgba(0, 0, 0, ${depthAlpha})`;
+                ctx.beginPath();
+
+                const angle = this.velocity.mag() > 0 ? Math.atan2(this.velocity.y, this.velocity.x) : 0;
+
+                ctx.save();
+                ctx.translate(x2d, y2d);
+                ctx.rotate(angle);
+
+                ctx.moveTo(size2d, 0);
+                ctx.lineTo(-size2d / 2, -size2d / 3);
+                ctx.lineTo(-size2d / 2, size2d / 3);
+                ctx.closePath();
+                ctx.fill();
+                ctx.restore();
+            }
+        }
+
+        // 鼠标虎鲸类
+        class MousePredator extends Predator {
+            constructor(x, y, z) {
+                super(x, y, z);
+                this.velocity = new Vector(0, 0, 0);
+                this.state = PREDATOR_STATE.HUNT;
+            }
+
+            update(mousePos, allPredators) {
+                this.acceleration.mult(0);
+                
+                let desired = Vector.sub(mousePos, this.position);
+                let distance = desired.mag();
+                
+                if (distance > 0) {
+                    desired.normalize();
+                    desired.mult(predatorSpeed);
+                    let steer = Vector.sub(desired, this.velocity);
+                    steer.limit(predatorTurnForce);
+                    this.applyForce(steer);
+                }
+
+                const avoidForce = this.avoidPredators(allPredators);
+                this.applyForce(avoidForce.mult(predatorAvoidWeight));
+
+                this.velocity.add(this.acceleration);
+                this.velocity.limit(predatorSpeed);
+                this.position.add(this.velocity);
+            }
+        }
+
+        // 鱼类
+        class Fish {
+            constructor(x, y, z) {
+                this.position = new Vector(x, y, z);
+                this.velocity = Vector.random3D().setMag(maxSpeed);
+                this.acceleration = new Vector(0, 0, 0);
+                this.eatenState = {
+                    isEaten: false,
+                    frameCount: 0
+                };
+            }
+
+            update() {
+                if (this.eatenState.isEaten) {
+                    this.eatenState.frameCount++;
+                    return;
+                }
+                this.velocity.add(this.acceleration);
+                this.velocity.limit(maxSpeed);
+                this.position.add(this.velocity);
+                this.acceleration.mult(0);
+            }
+
+            applyForce(force) {
+                if (!this.eatenState.isEaten) {
+                    this.acceleration.add(force);
+                }
+            }
+
+            flock(others, predators) {
+                if (this.eatenState.isEaten) return;
+                
+                let separation = this.separate(others).mult(separationWeight);
+                let alignment = this.align(others).mult(alignmentWeight);
+                let cohesion = this.cohesion(others).mult(cohesionWeight);
+                let predatorAvoid = this.avoidPredators(predators);
+
+                if (predatorAvoid.mag() > 0) {
+                    predatorAvoid.mult(predatorWeight);
+                    this.applyForce(predatorAvoid);
+                    this.applyForce(separation);
+                    this.applyForce(alignment);
+                } else {
+                    this.applyForce(separation);
+                    this.applyForce(alignment);
+                    this.applyForce(cohesion);
+                }
+            }
+
+            separate(others) {
+                if (this.eatenState.isEaten) return new Vector(0, 0, 0);
+                let steer = new Vector(0, 0, 0);
+                let count = 0;
+                for (let other of others) {
+                    if (other.eatenState.isEaten || other === this) continue;
+                    let d = Vector.sub(this.position, other.position).mag();
+                    if (d > 0 && d < separationDistance) {
+                        let diff = Vector.sub(this.position, other.position);
+                        diff.normalize();
+                        diff.div(d);
+                        steer.add(diff);
+                        count++;
+                    }
+                }
+                if (count > 0) {
+                    steer.div(count);
+                    steer.normalize();
+                    steer.mult(maxSpeed);
+                    steer.sub(this.velocity);
+                    steer.limit(maxForce);
+                }
+                return steer;
+            }
+
+            align(others) {
+                if (this.eatenState.isEaten) return new Vector(0, 0, 0);
+                let sum = new Vector(0, 0, 0);
+                let count = 0;
+                for (let other of others) {
+                    if (other.eatenState.isEaten || other === this) continue;
+                    let d = Vector.sub(this.position, other.position).mag();
+                    if (d > 0 && d < alignmentDistance) {
+                        sum.add(other.velocity);
+                        count++;
+                    }
+                }
+                if (count > 0) {
+                    sum.div(count);
+                    sum.normalize();
+                    sum.mult(maxSpeed);
+                    let steer = Vector.sub(sum, this.velocity);
+                    steer.limit(maxForce);
+                    return steer;
+                }
+                return new Vector(0, 0, 0);
+            }
+            
+            cohesion(others) {
+                if (this.eatenState.isEaten) return new Vector(0, 0, 0);
+                let sum = new Vector(0, 0, 0);
+                let count = 0;
+                for (let other of others) {
+                    if (other.eatenState.isEaten) continue;
+                    sum.add(other.position);
+                    count++;
+                }
+                if (count > 0) {
+                    sum.div(count);
+                    return this.steer(sum);
+                }
+                return new Vector(0, 0, 0);
+            }
+
+            steer(target) {
+                if (this.eatenState.isEaten) return new Vector(0, 0, 0);
+                let desired = Vector.sub(target, this.position);
+                let dist = desired.mag();
+                desired.normalize();
+
+                if (dist > 0) {
+                    desired.mult(maxSpeed);
+                    let steer = Vector.sub(desired, this.velocity);
+                    steer.limit(maxForce);
+                    return steer;
+                }
+                return new Vector(0, 0, 0);
+            }
+
+            avoidPredators(predators) {
+                if (this.eatenState.isEaten) return new Vector(0, 0, 0);
+                let avoidForce = new Vector(0, 0, 0);
+                let count = 0;
+
+                for (let predator of predators) {
+                    let d = Vector.sub(this.position, predator.position).mag();
+                    if (d < predatorDistance) {
+                        let diff = Vector.sub(this.position, predator.position);
+                        diff.normalize();
+                        diff.div(d);
+                        avoidForce.add(diff);
+                        count++;
+                    }
+                }
+                if (count > 0) {
+                    avoidForce.div(count);
+                    avoidForce.normalize();
+                    avoidForce.mult(maxSpeed);
+                    let steer = Vector.sub(avoidForce, this.velocity);
+                    steer.limit(maxForce);
+                    return steer;
+                }
+                return new Vector(0, 0, 0);
+            }
+
+            wrapAround() {
+                if (this.eatenState.isEaten) return;
+                if (this.position.x > width || this.position.x < 0) this.velocity.x *= -1;
+                if (this.position.y > height || this.position.y < 0) this.velocity.y *= -1;
+                if (this.position.z > wanderDepth || this.position.z < -wanderDepth) this.velocity.z *= -1;
+            }
+
+            draw() {
+                const fov = camera.fov;
+                const scale = fov / (fov + this.position.z);
+                const x2d = this.position.x * scale + (width / 2) * (1 - scale);
+                const y2d = this.position.y * scale + (height / 2) * (1 - scale);
+
+                let currentSize = fishSize;
+                let currentAlpha = 1;
+
+                if (this.eatenState.isEaten) {
+                    const progress = this.eatenState.frameCount / eatenAnimationDuration;
+                    currentSize = fishSize * (1 - progress);
+                    currentAlpha = 1 - progress;
+                }
+
+                const size2d = currentSize * scale;
+                const depthAlpha = (1 - (this.position.z / (wanderDepth * 2))) * currentAlpha;
+
+                ctx.fillStyle = `rgba(255, 255, 255, ${depthAlpha})`;
+                ctx.strokeStyle = `rgba(255, 255, 255, ${depthAlpha})`;
+                ctx.beginPath();
+
+                const angle = this.velocity.mag() > 0 ? Math.atan2(this.velocity.y, this.velocity.x) : 0;
+
+                ctx.save();
+                ctx.translate(x2d, y2d);
+                ctx.rotate(angle);
+
+                ctx.moveTo(size2d / 2, 0);
+                ctx.lineTo(-size2d / 2, -size2d / 4);
+                ctx.lineTo(-size2d / 2, size2d / 4);
+                ctx.closePath();
+                ctx.fill();
+                ctx.restore();
+            }
+
+            eaten() {
+                if (!this.eatenState.isEaten) {
+                    this.eatenState.isEaten = true;
+                    eatenCount++;
+                }
+            }
+        }
+
+        // 初始化鱼群
+        for (let i = 0; i < initialFishCount; i++) {
+            const x = Math.random() * width;
+            const y = Math.random() * height;
+            const z = Math.random() * wanderDepth * 2 - wanderDepth;
+            flock.push(new Fish(x, y, z));
+        }
+
+        // 初始化自动捕食者
+        for (let i = 0; i < predatorCount; i++) {
+            const x = Math.random() * width;
+            const y = Math.random() * height;
+            const z = Math.random() * wanderDepth * 2 - wanderDepth;
+            predators.push(new Predator(x, y, z));
+        }
+
+        // 鼠标虎鲸
+        const mousePredator = new MousePredator(-1000, -1000, 0);
+
+        function updateCounters() {
+            remainingCountEl.textContent = flock.filter(f => !f.eatenState.isEaten).length;
+            eatenCountEl.textContent = eatenCount;
+        }
+
+        function getFishSchoolCenter(flock) {
+            let sum = new Vector(0, 0, 0);
+            let count = 0;
+            for (let fish of flock) {
+                if (!fish.eatenState.isEaten) {
+                    sum.add(fish.position);
+                    count++;
+                }
+            }
+            if (count > 0) {
+                sum.div(count);
+                return sum;
+            }
+            return null;
+        }
+
+        function getFishSchoolRadius(flock, center) {
+            if (!center) return 0;
+            let maxDist = 0;
+            for (let fish of flock) {
+                if (!fish.eatenState.isEaten) {
+                    const dist = Vector.distance(fish.position, center);
+                    if (dist > maxDist) {
+                        maxDist = dist;
+                    }
+                }
+            }
+            return maxDist;
+        }
+
+        function animate() {
+            wanderTarget.add(wanderVelocity);
+
+            if (wanderTarget.x > width / 2 + wanderRadius || wanderTarget.x < width / 2 - wanderRadius) {
+                wanderVelocity.x *= -1;
+            }
+            if (wanderTarget.y > height / 2 + wanderRadius || wanderTarget.y < height / 2 - wanderRadius) {
+                wanderVelocity.y *= -1;
+            }
+            if (wanderTarget.z > wanderDepth || wanderTarget.z < -wanderDepth) {
+                wanderVelocity.z *= -1;
+            }
+
+            ctx.clearRect(0, 0, width, height);
+
+            const allPredators = [...predators, mousePredator];
+
+            mousePredator.update(mouse, allPredators);
+            mousePredator.draw();
+
+            for (let predator of predators) {
+                predator.update(allPredators, flock);
+                predator.draw();
+            }
+
+            const survivors = [];
+            for (let fish of flock) {
+                for (let predator of allPredators) {
+                    const distanceToPredator = Vector.sub(fish.position, predator.position).mag();
+                    if (distanceToPredator <= eatingDistance) {
+                        fish.eaten();
+                        break;
+                    }
+                }
+
+                fish.flock(flock, allPredators);
+                fish.update();
+                fish.wrapAround();
+                fish.draw();
+
+                if (!fish.eatenState.isEaten || fish.eatenState.frameCount < eatenAnimationDuration) {
+                    survivors.push(fish);
+                }
+            }
+
+            flock = survivors;
+            updateCounters();
+
+            requestAnimationFrame(animate);
+        }
+
+        animate();
+    </script>
+</body>
+</html>
